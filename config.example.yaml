@@ -1,0 +1,33 @@
+# Copy to config.yaml and edit. config.yaml is gitignored.
+
+storage:
+  backend: sqlite
+  path: data/scraped.db
+
+http:
+  timeout: 20
+  max_retries: 4
+  http2: true
+  proxy: null            # e.g. http://127.0.0.1:7890
+
+rate_limit:
+  # Requests per second per platform. Deliberately conservative — at this rate
+  # you're well below any per-IP threshold both sites enforce. Raise only if you
+  # have a reason (and watch for soft-bans in scrape_runs.error).
+  bilibili: 0.7
+  zhihu: 0.5
+
+bilibili:
+  # Optional: paste a logged-in cookie string from your browser to access
+  # endpoints that require authentication (e.g. higher-quality streams,
+  # full comment trees). Leave empty for anonymous browsing.
+  cookie: ""
+
+zhihu:
+  # Zhihu blocks anonymous access on most endpoints. Paste a logged-in
+  # cookie string from your browser. Required for question/answer fetching.
+  cookie: ""
+
+logging:
+  level: INFO
+  file: data/scraper.log

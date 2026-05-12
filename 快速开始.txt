@@ -1,0 +1,102 @@
+================================================================================
+  爬虫工具 — 快速开始
+================================================================================
+
+2 步上手，约 3 分钟。详细文档见 使用说明.txt。
+
+
+【开跑之前 · 先确认你有这些】
+
+  ✓ Python 3.12 或更高版本（3.14 也 OK，已实测）
+    检查：powershell 里跑  python --version
+  ✓ Git（用来 clone 仓库）
+  ✓ 约 250 MB 可用磁盘空间（依赖 + Chromium 浏览器）
+  ✓ 能正常访问 PyPI 和 GitHub（不需要梯子，但被墙的话装依赖会卡）
+
+  PowerShell 或 cmd 都行；下面命令以 PowerShell 为准。
+  如果你装的是 Python 启动器 `py`，下面所有 `python` 都可以换成 `py`。
+
+
+【第 1 步 · 安装依赖】
+
+    python -m venv .venv
+    .\.venv\Scripts\Activate.ps1
+    pip install -e .
+
+  `-e .` 是把当前目录作为一个可编辑的 Python 包安装 — 注册 `scraper` 命令、
+  以后改代码不用重新安装。如果你不打算改代码，写成 `pip install .` 也行。
+
+
+【第 2 步 · 启动】
+
+    python -m scraper
+
+  程序会自动：
+    • 检测有没有 config.yaml — 没有就引导你建（含安装 Playwright）
+    • 检测有没有登录知乎 — 没有就弹出浏览器让你登录，自动抓 cookie
+
+  登录知乎的方法：选 "现在打开浏览器登录 Zhihu?" → 弹出窗口里
+  正常登录（账号密码 / 短信 / 扫码都行）→ 回到终端按 Enter，
+  Cookie 自动写入 config.yaml。
+
+  设置完成后，直接输入关键词回车开始采集：
+
+    Keyword 关键词 (回车退出 / s 改设置): 电动车
+
+  采完会自动接着问下一个关键词。空回车或输入 q 退出，输入 s 改设置。
+
+
+【看一下采到了什么】
+
+    python -m scraper status              数据库现状
+    python -m scraper view question 536080693    单条记录详情
+
+  或打开分析 Notebook（推荐）：
+
+    jupyter notebook examples\notebooks\discussion_volume.ipynb
+
+  把 KEYWORD 改成你刚才采的关键词，菜单 Kernel → Restart & Run All，
+  自动生成一份带图表的分析报告。
+
+  CSV 文件自动导出到：data\exports\<关键词>_run<编号>_posts.csv
+  Excel 双击即可打开。
+
+
+【独立命令（熟悉后用）】
+
+    python -m scraper login zhihu         浏览器登录抓 cookie
+    python -m scraper scrape "电动车" --count 10    一键采集（不进交互）
+    python -m scraper doctor              一键体检
+
+
+【出问题了？】
+
+    python -m scraper doctor
+
+  会列出哪些组件没装好 / 配置错误，并给出修复命令。
+
+
+【更多】
+
+  • 完整功能手册       使用说明.txt
+  • 开发笔记 / API     CLAUDE.md
+  • 命令帮助           python -m scraper --help
+                       python -m scraper <command> --help
+
+
+控制台显示中文乱码？先执行一次：
+
+    chcp 65001
+
+
+【数据都在 data/ 目录里】
+
+  你采的所有东西都落在项目根目录的 data/ 下：
+    data/scraped.db           ← 主数据库
+    data/exports/             ← CSV 文件（Excel 直接打开）
+    data/cookies/             ← 跨会话保存的匿名 cookie
+    data/browser-profile/     ← 浏览器持久化 profile（保持登录态）
+
+  备份这个目录就是全部数据；删掉这个目录就是完全重置。
+
+================================================================================

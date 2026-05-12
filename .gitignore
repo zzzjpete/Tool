@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+config.yaml
+data/
+data/cookies/
+data/browser-profile/
+*.db
+*.sqlite
+*.log
+.idea/
+.vscode/
+.DS_Store
+
+# Local-only notes — not for the public repo
+CLAUDE.md
+反馈/

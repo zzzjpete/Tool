@@ -1,0 +1,650 @@
+================================================================================
+              爬虫工具 — 使用说明
+              （Bilibili + Zhihu 数据采集与讨论热度分析）
+================================================================================
+
+本工具用于按关键词从 Bilibili（B站）和 Zhihu（知乎）批量采集帖子、评论、点赞、
+收藏等数据，自动整理到 SQLite 数据库与 CSV 表格，方便后续做 ML 分析（如讨论
+热度趋势、内容聚类、情感分析等）。
+
+下面按"准备 → 基本使用 → 高级用法 → 分析数据 → 常见问题"的顺序讲解。
+所有命令请在项目根目录的 PowerShell 中执行。
+
+
+================================================================================
+  第一部分：环境准备
+================================================================================
+
+1.1 系统要求
+--------------------------------------------------------------------------------
+  • Windows 10 / 11（本工具在 PowerShell 下开发与测试）
+  • Python 3.12 或以上（项目在 3.14 上测试通过）
+  • 约 500 MB 磁盘空间（含 Playwright Chromium）
+
+1.2 安装依赖
+--------------------------------------------------------------------------------
+  在项目根目录打开 PowerShell，执行：
+
+      python -m venv .venv
+      .\.venv\Scripts\Activate.ps1
+      pip install -e .
+
+  这会安装：curl_cffi, aiosqlite, click, loguru, pandas, matplotlib, beautifulsoup4
+  等核心依赖，并注册 `scraper` 命令行工具。
+
+  ⚠ 注意：从 0.2 版本起 HTTP 后端已从 httpx 换成 curl_cffi，用于 TLS 指纹伪装
+  （详见 5.4 节"反爬防御"）。如果你是从旧版升级，需要重新跑一次 pip install。
+
+  也可以用旧式装法 `pip install -r requirements.txt`，等价但不会注册命令。
+
+1.3 一键启动（推荐新手）
+--------------------------------------------------------------------------------
+      python -m scraper
+
+  不带任何子命令直接运行，会进入"引导式交互模式"。程序会自动：
+    • 检测 config.yaml 是否存在 — 没有就引导你创建
+    • 检测 Playwright/Chromium 是否安装 — 没有就引导你安装
+    • 检测知乎 Cookie 是否有效 — 没有就弹浏览器让你登录（推荐方式）
+
+  全程回车选默认就行，遇到登录知乎的提示直接选"现在打开浏览器登录"。
+
+1.4 浏览器登录获取 Cookie（推荐 — 比手动复制简单）
+--------------------------------------------------------------------------------
+      python -m scraper login zhihu        # 登录知乎
+      python -m scraper login bilibili     # 登录 B 站（可选）
+
+  运行后：
+    1. 程序自动弹出 Chromium 浏览器窗口
+    2. 你在浏览器里正常登录（账号密码 / 手机短信 / 扫码登录都可以）
+    3. 登录完成后回到终端，按 Enter
+    4. Cookie 自动写入 config.yaml，无需手动复制粘贴
+
+  这条命令也会被 `interactive` 自动调用 — 大多数情况你都不用直接敲它。
+
+1.5 手动配置 Cookie（可选 — 不想用浏览器自动登录时）
+--------------------------------------------------------------------------------
+  如果上面的 `login` 命令因为环境问题无法使用，可以手动设置：
+
+      copy config.example.yaml config.yaml
+
+  用记事本或 VS Code 打开 config.yaml，重点关注两段：
+
+  【Bilibili 部分】（可选，匿名也能采集大部分公开接口）
+      bilibili:
+        cookie: ""    # 留空或粘贴登录后的 cookie 字符串
+
+  【Zhihu 部分】（必填，否则无法采集）
+      zhihu:
+        cookie: "_xsrf=...; z_c0=...; ..."    # 必须包含 z_c0
+
+  手动获取 Zhihu Cookie 的步骤：
+    1. 打开 https://www.zhihu.com 并登录
+    2. 按 F12 打开开发者工具，切到 Network（网络）标签
+    3. 刷新页面，点击任意一条对 zhihu.com 的请求
+    4. 在右侧 Headers → Request Headers 中找到 cookie: 后面那一长串
+    5. 整段复制粘贴到 config.yaml 的 zhihu.cookie 字段
+    注意：Cookie 中必须包含 "z_c0=..."，否则知乎接口会返回未登录错误
+
+  【速率与超时】（可调节但有默认值，建议保持原样）
+      rate_limit:
+        bilibili: 0.7    # B 站每秒最多 0.7 个请求
+        zhihu: 0.5       # 知乎每秒最多 0.5 个请求
+
+      这两个数字故意设得比较保守，配合 200–900ms 随机抖动后实际更慢，
+      能显著降低被风控的概率。不建议轻易调高。
+
+1.6 可选：手动安装 Playwright（采集知乎问题/回答必需）
+--------------------------------------------------------------------------------
+  知乎对接口请求有签名校验，纯 HTTP 请求会被拒绝，所以本工具改用
+  Playwright（真实浏览器内核）来跑知乎相关的页面。
+  浏览器登录命令 `login` 也依赖 Playwright。
+  `python -m scraper` 或 `init` 会自动提示是否安装，无需手动操作。
+  （想了解技术细节请看 CLAUDE.md — 关键词 "x-zse-96"）
+
+  如果想手动安装：
+
+      pip install playwright
+      python -m playwright install chromium
+
+  安装 Chromium 大约需要下载 150 MB，请保持网络畅通。
+  如果只用 Bilibili 不用知乎，可以跳过 Playwright。
+
+
+================================================================================
+  第二部分：基本使用（推荐新手从这里开始）
+================================================================================
+
+  ⚡ 一句话决策：
+    • 99% 的时候直接跑 `python -m scraper` 进交互模式即可。
+    • 只有写脚本、定时任务、或者需要在 CI 里一次性跑的时候才用 `scrape` 子命令。
+    • 两条路径采的数据落到同一个数据库，互不冲突。
+
+
+2.1 引导式向导（最简单 — 推荐新手）
+--------------------------------------------------------------------------------
+      python -m scraper            # 直接进交互模式
+                                   # 等价于 `python -m scraper interactive`
+
+  屏幕会逐步提示你输入。首次启动若 config.yaml 缺失或知乎 Cookie 没配，
+  会先引导你完成 init / 浏览器登录，无需中断重来。
+
+  设置阶段（只问一次）：
+    Posts per platform [10]:      ← 每个平台采集多少条，直接回车用默认 10
+    Platforms (both/bili/zhihu):  ← 选择平台，直接回车用 both
+    Include comments per post?    ← 是否采集评论，建议 y
+      Bilibili comment pages [1]:   B 站评论页数（每页约 20 条）
+      Zhihu answers per question:   知乎每个问题采集多少回答
+      Also fetch per-answer comments?  是否采集回答下面的评论（较慢，可跳过）
+    Export results to CSV?:       ← 是否同时导出 CSV，建议 y
+
+  循环阶段（可连续采多个关键词，不必每次重启命令）：
+    Keyword 关键词 (回车退出 / s 改设置): 电动车      ← 输入关键词回车开始采
+    [采集进度...摘要...]
+
+    Keyword 关键词 (回车退出 / s 改设置): 新能源      ← 继续输入下一个关键词
+    [采集进度...摘要...]
+
+    Keyword 关键词 (回车退出 / s 改设置): s           ← 输入 s 重设设置
+    [...重新走一遍设置流程...]
+
+    Keyword 关键词 (回车退出 / s 改设置):             ← 空回车（或输入 q）退出
+
+  每次采集结束会自动打印一份摘要 + 自动生成 CSV 文件位置。
+
+  ⚠ 注意：如果在终端里输入中文显示成乱码，先执行 chcp 65001 切换到 UTF-8
+    控制台，然后再运行 interactive 命令。
+
+2.2 一键命令（适合熟悉参数后或定时任务）
+--------------------------------------------------------------------------------
+  跨平台同时采集（B站 + 知乎并行）：
+      python -m scraper scrape "电动车" --count 20
+
+  只采集 B 站：
+      python -m scraper bili scrape "电动车" --count 20 --comments-pages 2
+
+  只采集知乎：
+      python -m scraper zhihu scrape "电动车" --count 10 --answers-per-q 5
+
+  多个关键词（空格分隔）：
+      python -m scraper scrape "电动车" "新能源" "比亚迪" --count 15
+
+  采集完会自动把每次运行的结果写到：
+      data/exports/<关键词>_run<编号>_posts.csv
+      data/exports/<关键词>_run<编号>_comments.csv
+
+  CSV 文件用 UTF-8 BOM 编码，Excel 双击可直接打开并正确显示中文。
+
+2.3 完整参数说明
+--------------------------------------------------------------------------------
+  通用参数：
+    --count N             每个平台、每个关键词采集 N 个帖子（默认 10）
+    --csv / --no-csv      是否自动导出 CSV（默认 --csv）
+    --platforms LIST      限定平台，例如 --platforms bili 只跑 B 站
+
+  Bilibili 专用：
+    --comments-pages N    每个视频采集多少页评论，0 表示不采（默认 1）
+    --concurrency N       并发数（默认 4）
+
+  Zhihu 专用：
+    --answers-per-q N     每个问题最多采集多少回答（默认 5）
+    --comments-per-answer N
+                          每个回答采集多少条评论。0 表示不采（默认 0）。
+                          ⚠ 此选项较慢，因为需要用浏览器模拟滚动+点击触发
+                          知乎的懒加载，每条回答多花 3–5 秒。
+
+
+================================================================================
+  第三部分：查看与分析数据
+================================================================================
+
+3.1 查看当前数据库状态
+--------------------------------------------------------------------------------
+      python -m scraper status
+
+  几乎瞬间返回，显示：
+    • 数据库路径与大小
+    • 各表数据行数（视频、回答、评论、运行记录等）
+    • 已采集的关键词数量与帖子总数
+    • 按帖子数量排名前 5 的关键词
+    • 最近 5 次采集运行的成功/失败状态、耗时
+    • 已导出 CSV 数量与总大小
+    • Cookie 配置情况
+
+  建议每次开始分析前都先跑一下这条命令，看看你有什么数据。
+
+3.2 查看单条记录
+--------------------------------------------------------------------------------
+      python -m scraper view <类型> <ID>
+
+  类型可选：video / dynamic / question / answer / article / column / comment
+
+  示例：
+      python -m scraper view video BV1xx411c7XW         # 看一个 B 站视频
+      python -m scraper view question 536080693          # 看一个知乎问题
+      python -m scraper view answer 2199786648            # 看一个知乎回答
+      python -m scraper view answer 2199786648 --comments 20
+                                                          # 同时显示该回答下
+                                                          # 点赞最高的 20 条评论
+
+  会美观地打印所有字段，自动把时间戳转换成可读日期，并在末尾列出关联评论。
+
+3.3 导出指定数据
+--------------------------------------------------------------------------------
+  采集时已自动生成 CSV，但如果要导出整个数据库的某张表：
+
+      python -m scraper export --format csv --table posts_unified --out posts.csv
+      python -m scraper export --format csv --table comments_unified --out comments.csv
+      python -m scraper export --format json --out backup.json
+                                # 不指定 --table 则导出所有表为 JSON
+
+  推荐的表/视图：
+    posts_unified         — 跨平台帖子统一视图（中文列名，
+                            包含：平台/帖子ID/笔记链接/作者ID/作者昵称/
+                            发布时间/标题/内容/标签/评论数量/点赞数量/
+                            收藏数量/转发数量/播放数量/抓取时间）
+    comments_unified      — 跨平台评论统一视图
+    keyword_posts_unified — 关键词 → 帖子的映射 + 采集运行信息
+
+3.4 用 Jupyter Notebook 做分析（推荐方式）
+--------------------------------------------------------------------------------
+  本工具自带一个完整的起步 notebook：
+
+      jupyter notebook examples\notebooks\discussion_volume.ipynb
+
+  打开后只需修改第一个代码单元格里的：
+
+      KEYWORD = "国内新能源汽车"  ← 改成你要分析的关键词
+
+  然后在 Jupyter 顶部菜单选 Kernel → Restart & Run All
+  （这一步的意思是：清空之前所有计算结果，从头到尾把整本 notebook 重跑一遍。
+   Jupyter notebook 是按格子运行的，重跑全部就是让所有图表都基于你最新的数据。）
+
+  会自动生成一份包含以下内容的小报告：
+    1. 当前关键词已有几次采集运行
+    2. 各平台数据量统计
+    3. 按发布日期统计的发帖量柱状图
+    4. 按互动量排名的 Top 帖子表格 + 横向条形图
+    5. 点赞/评论数量分布（对数坐标直方图）
+    6. B站 vs 知乎平台对比图
+    7. 高赞回答内容预览 + 评论样本
+    8. 单帖热度增长曲线（需要多日采集才有意义）
+
+  如果你想自己写 Python 代码分析，关键 API 是：
+
+      from scraper.analyze import (
+          posts_for_keyword,    # 某关键词的所有帖子（问题/视频层级）
+          answers_for_keyword,  # 某关键词问题下的所有回答
+          comments_for_post,    # 单个帖子的所有评论
+          volume_by_day,        # 按日发帖量与互动总量聚合
+          engagement_history,   # 单帖在多次采集间的互动变化
+          scrape_run_summary,   # 历史采集运行汇总
+          as_dataframe,         # 万能：把任意表/视图读成 DataFrame
+          export_run_to_csv,    # 把某次运行的数据导出为 CSV
+      )
+
+      import scraper.viz as viz
+      fig = viz.volume_chart("电动车")
+      fig.savefig("trend.png")
+
+
+================================================================================
+  第四部分：数据存储说明
+================================================================================
+
+4.1 数据库位置
+--------------------------------------------------------------------------------
+  所有采集结果统一存到：
+
+      data\scraped.db        ← SQLite 数据库，可用 DB Browser for SQLite 打开
+
+  CSV 导出文件存到：
+
+      data\exports\<关键词>_run<编号>_posts.csv
+      data\exports\<关键词>_run<编号>_comments.csv
+
+  日志文件：
+
+      data\scraper.log       ← 滚动日志，每 10 MB 切片
+
+4.2 主要数据表
+--------------------------------------------------------------------------------
+  Bilibili 相关：
+    bili_videos              视频基本信息（含 tags 字段）
+    bili_comments            视频评论
+    bili_dynamics            UP 主动态
+    bili_search              搜索结果记录
+
+  Zhihu 相关：
+    zhihu_questions          问题（含 topics 话题字段）
+    zhihu_answers            回答（内容、点赞、评论数等）
+    zhihu_answer_comments    回答下的评论
+    zhihu_columns            专栏元数据
+    zhihu_articles           专栏文章
+    zhihu_search             搜索结果记录
+
+  机器学习/分析专用：
+    scrape_runs              每次 scrape 命令的运行记录
+                             （时间、关键词、采集量、错误信息）
+    keyword_posts            关键词 → 帖子的多对多关系表
+    engagement_snapshots     每次采集自动记录的"互动数据快照" — 后续重复
+                             采集同一帖子时不覆盖，而是追加。多次采集后
+                             就能看到点赞/评论数随时间增长的曲线。
+
+  跨平台统一视图（中文列名，分析时直接用）：
+    posts_unified            所有帖子（视频+问题+回答）一张表
+    comments_unified         所有评论一张表
+    keyword_posts_unified    关键词 ↔ 帖子 + 运行信息
+
+  ⚠ 所有表都额外保存了一份 `raw` 字段（原始 JSON），如果你后续想从原始数据
+  中提取新字段，不需要重新爬取，直接 JSON 解码即可。
+
+
+================================================================================
+  第五部分：高级用法
+================================================================================
+
+5.1 定时采集（Windows 任务计划程序）
+--------------------------------------------------------------------------------
+  要让讨论热度分析有意义，需要定期采集同一批关键词，这样 engagement_snapshots
+  表才能积累出时间序列。
+
+  在 PowerShell 中执行一次以下命令（注意把路径改成你自己的）：
+
+      $action = New-ScheduledTaskAction `
+          -Execute "python" `
+          -Argument "-m scraper scrape `"电动车`" `"新能源`" --count 20" `
+          -WorkingDirectory "C:\Users\Jinxi Zhang\Desktop\爬虫工具 （开发中）"
+      $trigger = New-ScheduledTaskTrigger -Daily -At 9am
+      Register-ScheduledTask -TaskName "DailyScrape" `
+          -Action $action -Trigger $trigger
+
+  之后每天上午 9 点会自动跑一次。
+  查看/删除任务：在"开始 → 任务计划程序"里找 DailyScrape。
+
+5.2 手动调用浏览器回退（可选）
+--------------------------------------------------------------------------------
+  对于 JS 动态渲染或需要签名的页面，可以用 BrowserSession：
+
+      from scraper import BrowserSession, load_config
+      import asyncio
+
+      async def main():
+          cfg = load_config("config.yaml")
+          async with BrowserSession(
+              cookie=cfg.zhihu.cookie,
+              cookie_domain=".zhihu.com",
+          ) as bs:
+              html = await bs.get_html("https://www.zhihu.com/question/12345")
+              print(len(html))
+
+      asyncio.run(main())
+
+  此模式默认开启两层 stealth 反检测：
+    Layer 1（始终启用）— 手写 init-script，盖 navigator.webdriver / languages /
+                        plugins / window.chrome 等基础指纹
+    Layer 2（推荐安装）— playwright-stealth 插件，再补 ~20 个进阶指纹向量
+                        （canvas / WebGL / AudioContext / mediaDevices 等）
+                        安装：pip install playwright-stealth
+
+  也可以传 user_data_dir 让浏览器使用持久化 profile（localStorage、IndexedDB、
+  cookie 跨会话保留），看起来像"老用户"而不是每次都是全新设备：
+
+      async with BrowserSession(
+          cookie=cfg.zhihu.cookie,
+          cookie_domain=".zhihu.com",
+          user_data_dir="data/browser-profile/zhihu",  # ← 持久化 profile
+      ) as bs: ...
+
+5.3 编程接口（不通过 CLI）
+--------------------------------------------------------------------------------
+  所有功能都可以在 Python 代码中直接调用：
+
+      import asyncio
+      from scraper import BilibiliScraper, ZhihuScraper, SqliteStorage, load_config
+
+      async def main():
+          cfg = load_config("config.yaml")
+          storage = SqliteStorage(cfg.storage.path)
+          await storage.init()
+
+          async with BilibiliScraper(cfg, storage) as bili:
+              summary = await bili.scrape_keyword(
+                  "电动车", count=10, comments_pages=1, with_tags=True
+              )
+              print(summary)
+
+          await storage.close()
+
+      asyncio.run(main())
+
+5.4 反爬防御（已内置，了解一下就行）
+--------------------------------------------------------------------------------
+  本工具在 HTTP 与浏览器两侧都做了多层指纹伪装，正常使用不需要任何配置 —
+  下面只是让你知道发生了什么、出问题时怎么排查。
+
+  HTTP 侧（curl_cffi 替代 httpx）：
+    • TLS/JA3 指纹伪装  — 连接握手看起来像真实的 Chrome 120–136 之一
+                          （每次 session 启动时随机挑一个），不是 Python
+    • UA 轮换 + Sec-CH-UA + Sec-Fetch-* — 所有现代浏览器都会发，缺一个就是
+                          bot 信号；本工具全部按所选 UA 类别匹配地发齐
+    • 200–900 ms 随机抖动 — 在 token bucket 速率之上再加随机延迟，破坏
+                            "每秒精确 0.7 次"的机器人 cadence
+
+  Cookie 持久化（自动）：
+    • Bilibili 的匿名 cookie（buvid3 / b_nut）和知乎的 _xsrf 等会自动保存到
+      data/cookies/<platform>.json，下次启动加载回来
+    • 看起来像"老用户回访"而不是每次都是新设备
+    • 想"重置身份"重新开始？删掉 data/cookies/ 整个文件夹即可
+
+  浏览器侧（BrowserSession）：
+    • 双层 stealth — 手写 init-script + playwright-stealth 插件（推荐安装，
+      详见 5.2 节）
+    • 持久化 profile — 知乎采集默认使用 data/browser-profile/zhihu/
+      （localStorage、IndexedDB、cookie 都保留）
+    • python -m scraper login zhihu 也写入同一个 profile —
+      登录一次后所有后续采集都保持登录态
+
+  出问题时的排查顺序：
+    1. python -m scraper doctor               看缺啥
+    2. 看 data/scraper.log 末尾的错误码
+    3. 如果是知乎 40362（请求异常）— 检查 playwright-stealth 是否装了
+    4. 如果是 Bilibili -352 / 412 — 删 data/cookies/bilibili.json 重试
+    5. 如果是连续 SoftBanned — 等 10–30 分钟或换网络环境
+
+
+================================================================================
+  第六部分：常见问题与故障排查
+================================================================================
+
+  ⚠ 新手最常问的三个问题先放最前面：
+
+【Q0a】这工具会不会让我被封号？我能爬多少次？
+  A: 默认速率限制非常保守（B 站 0.7 rps / 知乎 0.5 rps），加上 200–900 ms
+     随机抖动，实际比这还慢。**日常正常用（每天爬几个关键词、每个几十条）
+     被封号的概率极低**。
+
+     但请注意：
+     • 知乎 cookie 是绑定你账号的 — 被风控时账号本身可能被临时降权（搜索
+       结果变少、被要求短信验证）。一般 24 小时内自动恢复。
+     • B 站可以匿名采集大部分公开内容，**不需要登录**，因此完全不影响账号。
+     • 如果一天要采几百条以上、或者持续好几小时不停 — 强烈建议拉长间隔、
+       分多天跑，或者用小号专门做这件事。
+     • 出现 `SoftBanned` 警告时立即停下，等 10–30 分钟再试。
+
+【Q0b】这违法吗？我能拿来发文章 / 出报告 / 商用吗？
+  A: 本工具**仅适合个人研究 / 学术分析等非商业场景**。
+
+     使用前请确认：
+     • 遵守 B 站和知乎的服务条款及 robots.txt
+     • 不要把采集结果二次分发（原文、原图、用户隐私）
+     • 不要用于商业用途、广告投放、舆情监控售卖等
+     • 数据分析结论可以发表，但**原始数据不要外传**
+     • 如果是为机构 / 公司做事，先咨询法务
+
+     中国《网络安全法》《数据安全法》《个人信息保护法》对爬取行为都有约束。
+     如果你不确定，**就当作不能用**。
+
+【Q0c】我能爬到历史数据吗？比如 2020 年的视频？
+  A: 受平台搜索接口限制，本工具**采的是关键词搜索返回的当前结果**，不是
+     时间倒排的全量数据。具体来说：
+     • B 站：按 `totalrank`（综合排序）取搜索结果前 N 条 — 通常是近 1–2 年
+       的热门视频，少量更老但持续有流量的会上来。
+     • 知乎：按相关度返回问题列表，每个问题取 ~5 条回答（页面打开时一次
+       性渲染出来的那批，通常是高赞或最新；再往下滑加载的不在我们的采集
+       范围内）。
+     • 想拿到特定时间段的旧帖？目前没有按日期筛选的接口包装。可以采下来
+       后用 `posts_unified` 视图的 `发布时间` 字段在 pandas 里过滤。
+     • 想做长时间趋势？**重复采集同一关键词** — engagement_snapshots 表
+       会自动记录每次的点赞/评论数变化，画增长曲线就够用了。
+
+【Q0d】我跑了几天好好的，今天突然爬不到数据 / 都返回空，怎么办？
+  A: 按以下顺序排查（每步都跑一下再继续下一步）：
+
+     1. `python -m scraper doctor` — 看体检结果，特别是网络探测部分
+     2. 看日志最后 50 行：`Get-Content data/scraper.log -Tail 50`
+        关注 `SoftBanned` / `CookieExpired` / `401` / `403` / `40362` 这类
+     3. 如果是 cookie 过期 → `python -m scraper login zhihu` 重新登录
+     4. 如果是 SoftBanned 反复出现 → 停 30 分钟再试；或者降速率到 0.3
+     5. 删 `data/cookies/<platform>.json` 重新拿匿名 cookie（B 站常用）
+     6. 换网络（连热点 / 换 IP）
+     7. 以上都不行 → 平台改接口了 — 看 CLAUDE.md 里的端点说明对一下
+
+---
+
+【Q1】终端里输入中文显示乱码？
+  A: PowerShell 默认是 GBK 编码。执行一次：
+        chcp 65001
+     切换到 UTF-8 后再用任何带中文输入的命令。
+
+【Q2】运行后报 "CookieExpired: zhihu cookie expired"？
+  A: 知乎 Cookie 失效了。最简单的修复：
+
+         python -m scraper login zhihu
+
+     会自动弹浏览器让你重新登录并写回 config.yaml。
+     如果浏览器登录不可用，按 1.5 节手动复制 cookie 到 config.yaml。
+
+【Q3】"SoftBanned: zhihu search returned 0 results" 怎么办？
+  A: 被知乎/B站临时风控了。处理方法（按推荐顺序）：
+       1. 停 10–30 分钟再试
+       2. 检查 Cookie 是否过期
+       3. 在 config.yaml 里把对应平台的 rate_limit 调更低（如 0.3）
+       4. 换个网络环境（连热点/换 IP）
+
+【Q4】"zhihu comments: lazy-load didn't fire" 警告？
+  A: 知乎评论懒加载没触发，是已知偶发问题。出现这条警告时该回答的内容
+     仍然保存了（数量在 zhihu_answers.comment_count 字段里），只是没有
+     拉到具体评论文本。可以重试该回答，或忽略。
+
+【Q5】Playwright 报 TimeoutError？
+  A: 通常是网络慢或者目标页面响应异常。检查：
+       1. 网络能否正常打开 zhihu.com
+       2. Cookie 是否仍然有效
+       3. 重试一次，偶发问题大概率消失
+
+【Q6】采集了，但 posts_for_keyword 返回空？
+  A: 大概率是查询的关键词与采集时的关键词字符串不完全一致（多/少空格、
+     全/半角差异）。运行 `python -m scraper status` 查看实际采集过的
+     关键词列表，复制粘贴使用。
+
+【Q7】Excel 打开 CSV 显示中文乱码？
+  A: 用最新版 Excel（2016+）一般可以正常打开。本工具生成的 CSV 带
+     UTF-8 BOM 标记。如果仍然乱码：
+       1. Excel：数据 → 从文本/CSV → 选 UTF-8 编码 → 加载
+       2. 或者用 WPS / LibreOffice Calc 打开，对 UTF-8 兼容性更好
+
+【Q8】如何删除/重置数据？
+  A: 直接删除 data\scraped.db 即可，下次运行会自动重建表结构。
+     如果只想删某个关键词的数据，可以用 DB Browser for SQLite 手动
+     执行 DELETE FROM keyword_posts WHERE keyword = '...'，
+     具体表关联较复杂，建议谨慎操作或直接重新采集。
+
+
+================================================================================
+  第七部分：项目文件结构
+================================================================================
+
+  爬虫工具 （开发中）/
+  │
+  ├─ config.yaml                ← 你的本地配置（含 Cookie，不上传 Git）
+  ├─ config.example.yaml        ← 示例配置（复制成 config.yaml）
+  ├─ requirements.txt           ← Python 依赖
+  ├─ CLAUDE.md                  ← 给 AI 助手看的开发笔记（你也可以看）
+  ├─ README.md                  ← 项目简介
+  ├─ 使用说明.txt                ← ← 当前这份文档
+  │
+  ├─ scraper/                   ← 主代码包
+  │  ├─ __main__.py               入口点（python -m scraper）
+  │  ├─ cli.py                    所有 CLI 命令定义
+  │  ├─ analyze.py                pandas 分析助手
+  │  ├─ viz.py                    matplotlib 绘图助手
+  │  ├─ core/                     核心基础设施
+  │  │  ├─ session.py               HTTP 会话（curl_cffi TLS 伪装、速率限制、
+  │  │  │                            重试、UA/Sec-CH-UA/Sec-Fetch 头、Cookie 持久化）
+  │  │  ├─ browser.py               Playwright 回退（双层 stealth、可选持久化 profile）
+  │  │  ├─ storage.py               SQLite 存储 + 视图定义
+  │  │  ├─ rate_limit.py            令牌桶限流
+  │  │  ├─ config.py                config.yaml 加载
+  │  │  └─ exceptions.py            异常定义
+  │  └─ platforms/
+  │     ├─ bilibili/                B 站采集逻辑 + WBI 签名
+  │     └─ zhihu/                   知乎采集逻辑
+  │
+  ├─ examples/
+  │  ├─ scrape_bilibili_video.py    单文件示例：采视频+评论
+  │  ├─ scrape_bilibili_dynamics.py 单文件示例：采动态
+  │  ├─ scrape_zhihu_question.py    单文件示例：采问题+回答
+  │  ├─ scrape_zhihu_column.py      单文件示例：采专栏
+  │  ├─ browser_fallback.py         浏览器回退使用示例
+  │  └─ notebooks/
+  │     └─ discussion_volume.ipynb  分析起步 Notebook（推荐）
+  │
+  └─ data/                      ← 运行后自动生成
+     ├─ scraped.db                SQLite 数据库
+     ├─ scraper.log               日志
+     ├─ exports/                  自动导出的 CSV 文件
+     ├─ cookies/                  跨会话持久化的 HTTP cookie jar（buvid3 等）
+     └─ browser-profile/          Playwright 持久化 profile（登录态保留）
+
+
+================================================================================
+  快速参考表（命令速查）
+================================================================================
+
+  常用命令                                          | 用途
+  --------------------------------------------------|---------------------------
+  python -m scraper                                 | 进交互模式（首选）
+  python -m scraper login zhihu                     | 浏览器登录抓 Cookie
+  python -m scraper init                            | 首次设置向导
+  python -m scraper doctor                          | 体检（缺啥提示啥）
+  python -m scraper scrape "kw" --count N           | 双平台一键采集（不交互）
+  python -m scraper bili scrape "kw"                | 只采 B 站
+  python -m scraper zhihu scrape "kw"               | 只采知乎
+  python -m scraper status                          | 查看数据库状态
+  python -m scraper view video <BVID>               | 查看单条记录
+  python -m scraper export --format csv --table ... | 手动导出
+  jupyter notebook examples\notebooks\...           | 打开分析 Notebook
+
+  常用参数                                          | 含义
+  --------------------------------------------------|---------------------------
+  --count N                                         | 每平台采集 N 条
+  --comments-pages N                                | B 站每视频采 N 页评论
+  --answers-per-q N                                 | 知乎每问题采 N 条回答
+  --comments-per-answer N                           | 知乎每回答采 N 条评论
+  --platforms bili,zhihu                            | 选择平台
+  --no-csv                                          | 不自动导出 CSV
+
+
+================================================================================
+  最后
+================================================================================
+
+如果遇到本说明没写到的问题，可以：
+  • 看 CLAUDE.md（更技术、更详细的开发笔记）
+  • 看 data\scraper.log 里的错误堆栈
+  • 用 python -m scraper status 看一下数据库现状
+
+本工具是个人/研究用途，请遵守 B 站与知乎的服务条款，不要过度抓取或商用。
+默认速率限制已经设得很保守，正常使用一般不会触发风控，但请也克制频次。
+
+祝研究顺利！

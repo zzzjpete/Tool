@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pachong-tool"
+version = "0.2.0"
+description = "Async scraping framework for Bilibili and Zhihu with built-in ML/analysis layer (爬虫工具)"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [
+    { name = "Jinxi Zhang" },
+]
+keywords = ["bilibili", "zhihu", "scraping", "crawler", "media-crawler", "discussion-volume"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: Microsoft :: Windows",
+    "Topic :: Internet :: WWW/HTTP",
+]
+
+dependencies = [
+    "curl_cffi>=0.7.0",
+    "aiosqlite>=0.19.0",
+    "PyYAML>=6.0",
+    "click>=8.1.0",
+    "tenacity>=8.2.0",
+    "loguru>=0.7.0",
+    "pydantic>=2.5.0",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.1.0",
+    "fake-useragent>=1.4.0",
+    "pandas>=2.2.0",
+    "matplotlib>=3.8.0",
+]
+
+[project.optional-dependencies]
+browser = ["playwright>=1.45.0", "playwright-stealth>=2.0.0"]
+notebook = ["jupyter>=1.0", "nbconvert>=7.0", "ipykernel>=6.0"]
+
+[project.scripts]
+# After `pip install -e .`, users can run `scraper interactive` instead of
+# `python -m scraper interactive`.
+scraper = "scraper.cli:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["scraper"]
