@@ -22,6 +22,8 @@ class HttpConfig(BaseModel):
 class RateLimitConfig(BaseModel):
     bilibili: float = 1.5
     zhihu: float = 1.0
+    weibo: float = 0.8
+    tieba: float = 0.8
 
 
 class PlatformAuth(BaseModel):
@@ -39,6 +41,8 @@ class Config(BaseModel):
     rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
     bilibili: PlatformAuth = Field(default_factory=PlatformAuth)
     zhihu: PlatformAuth = Field(default_factory=PlatformAuth)
+    weibo: PlatformAuth = Field(default_factory=PlatformAuth)
+    tieba: PlatformAuth = Field(default_factory=PlatformAuth)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
 

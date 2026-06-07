@@ -1,7 +1,7 @@
 # 爬虫工具
 
-Async scraping + ML-analysis toolkit for **Bilibili** and **Zhihu**. Built for
-personal/research use on Windows.
+Async scraping + ML-analysis toolkit for **Bilibili**, **Zhihu**, **Weibo**, and
+**Baidu Tieba**. Built for personal/research use on Windows.
 
 Given a keyword, it fetches relevant posts and comments, persists them to SQLite
 + exports CSVs, and gives you a Jupyter notebook + pandas helpers for
@@ -37,10 +37,14 @@ For the full manual: see **使用说明.txt**.
 
 **Collection**
 - Search → top-N → fan-out fetch with full content + comments. Cross-platform
-  in one command: `scrape "<kw>"` runs Bilibili + Zhihu in parallel.
+  in one command: `scrape "<kw>"` runs all four platforms in parallel.
 - Bilibili: videos, comments, dynamics, user uploads, search (WBI-signed).
 - Zhihu: questions (browser-rendered to bypass x-zse-96), top-5 answers per
   question, per-answer comments, columns, articles, search.
+- Weibo: keyword search + hot-flow comments + single posts via the `m.weibo.cn`
+  JSON API (no signing). Keyword search needs a logged-in cookie (the `SUB` token).
+- Tieba: keyword → threads + reply floors, sign-free via the mobile JSON 吧 feed
+  (`getFrsData` / `getPbData`), with an HTML-search fallback. Works anonymously.
 - Browser fallback via Playwright with stealth flags (works around Zhihu's
   headless detection).
 
@@ -48,7 +52,7 @@ For the full manual: see **使用说明.txt**.
 - Per-session UA rotation across Chrome/Edge/Safari/Firefox × desktop/mobile,
   with matching `Sec-CH-UA` client hints.
 - Randomized `Accept-Language`, 200–900 ms request jitter.
-- Conservative rate limits (0.7 rps bilibili / 0.5 rps zhihu).
+- Conservative rate limits (0.7 bilibili / 0.5 zhihu / 0.8 weibo / 0.8 tieba, rps).
 - `CookieExpired` and `SoftBanned` exceptions catch state issues early.
 
 **Storage**
@@ -83,6 +87,8 @@ For the full manual: see **使用说明.txt**.
 - Windows 10/11 (PowerShell)
 - ~500 MB disk including Playwright Chromium
 - A logged-in Zhihu cookie (anonymous Zhihu API access is mostly blocked)
+- A logged-in Weibo cookie — the `SUB` token — for Weibo keyword search
+  (Bilibili and Tieba work anonymously)
 
 ---
 
@@ -95,9 +101,12 @@ python -m scraper doctor                     # diagnostic check
 python -m scraper status                     # DB inventory
 
 # Scraping
-python -m scraper scrape "<kw>" --count 20            # both platforms
+python -m scraper scrape "<kw>" --count 20            # all four platforms in parallel
+python -m scraper scrape "<kw>" --platforms weibo,tieba --count 20   # restrict to a subset
 python -m scraper bili scrape "<kw>" --count 20
 python -m scraper zhihu scrape "<kw>" --count 20 --comments-per-answer 5
+python -m scraper weibo scrape "<kw>" --count 20 --comments 10
+python -m scraper tieba scrape "<kw>" --count 20 --replies 10
 python -m scraper interactive                          # guided prompts
 
 # Per-record
@@ -105,10 +114,15 @@ python -m scraper bili video BV1xx411c7XW
 python -m scraper bili dynamics <mid>
 python -m scraper zhihu question 12345
 python -m scraper zhihu column c_1234567890
+python -m scraper weibo comments <post_id>
+python -m scraper tieba thread <tid>
+python -m scraper grab "https://m.weibo.cn/detail/<id>"   # paste any supported URL
 
 # View & export
 python -m scraper view video BV1xx411c7XW
 python -m scraper view answer 2199786648 --comments 20
+python -m scraper view weibo <post_id>
+python -m scraper view thread <tid>
 python -m scraper export --format csv --table posts_unified --out posts.csv
 ```
 
@@ -120,7 +134,10 @@ Every `scrape` command auto-exports CSVs; `--no-csv` to disable.
 
 ```python
 import asyncio
-from scraper import BilibiliScraper, ZhihuScraper, SqliteStorage, load_config
+from scraper import (
+    BilibiliScraper, ZhihuScraper, WeiboScraper, TiebaScraper,
+    SqliteStorage, load_config,
+)
 from scraper.analyze import posts_for_keyword, volume_by_day
 
 async def collect():
@@ -129,6 +146,8 @@ async def collect():
     await storage.init()
     async with BilibiliScraper(cfg, storage) as bili:
         await bili.scrape_keyword("电动车", count=20, comments_pages=1)
+    async with TiebaScraper(cfg, storage) as tieba:        # sign-free, works anonymously
+        await tieba.scrape_keyword("电动车", count=20, replies_per_thread=10)
     await storage.close()
 
 asyncio.run(collect())
@@ -148,6 +167,8 @@ scraper/
   platforms/
     bilibili/     WBI signing + endpoints
     zhihu/        initialData parser + browser-based question fetcher
+    weibo/        m.weibo.cn container API + hotflow comments
+    tieba/        f/search/res + mobile JSON (getFrsData / getPbData), sign-free
   analyze.py      pandas helpers
   viz.py          matplotlib helpers
   cli.py          all CLI commands
@@ -167,9 +188,13 @@ CLAUDE.md             ← developer notes / architectural reasoning
 
 - Respect each site's ToS. This is for personal / research use; rate limits are
   intentionally conservative.
-- Both Bilibili and Zhihu change their anti-bot logic regularly. If `scrape`
-  starts returning empty results or 403s, run `python -m scraper doctor`, then
-  refresh your cookie.
+- All four sites change their anti-bot logic regularly. If `scrape` starts
+  returning empty results or 403s, run `python -m scraper doctor`, then refresh
+  your cookie.
 - Zhihu's question/answer endpoints require `x-zse-96` signing which we don't
   reproduce — those are fetched via Playwright by parsing the page's embedded
-  `js-initialData` JSON. See CLAUDE.md for details.
+  `js-initialData` JSON.
+- Weibo keyword search requires the `SUB` cookie (anonymous search returns
+  `ok=-100`); without it Weibo is skipped during a scrape, not fatal.
+- Tieba uses the sign-free mobile JSON path; on flagged / datacenter IPs the HTML
+  search page may 403, so it prefers the 吧 feed. See CLAUDE.md for details.

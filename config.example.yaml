@@ -16,6 +16,8 @@ rate_limit:
   # have a reason (and watch for soft-bans in scrape_runs.error).
   bilibili: 0.7
   zhihu: 0.5
+  weibo: 0.8
+  tieba: 0.8
 
 bilibili:
   # Optional: paste a logged-in cookie string from your browser to access
@@ -26,6 +28,18 @@ bilibili:
 zhihu:
   # Zhihu blocks anonymous access on most endpoints. Paste a logged-in
   # cookie string from your browser. Required for question/answer fetching.
+  cookie: ""
+
+weibo:
+  # m.weibo.cn keyword search now REQUIRES a logged-in cookie (the SUB token);
+  # anonymous search returns ok=-100. `python -m scraper login weibo` opens a
+  # browser to grab it. Left empty, weibo is simply skipped during a scrape.
+  cookie: ""
+
+tieba:
+  # Tieba works anonymously: keyword search uses the mobile 吧 feed (the keyword
+  # is treated as a 吧 name), falling back to cross-bar HTML search. A cookie
+  # (BDUSS) only helps high-volume scraping. Optional.
   cookie: ""
 
 logging:

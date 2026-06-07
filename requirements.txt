@@ -10,6 +10,7 @@ lxml>=5.1.0
 fake-useragent>=1.4.0
 pandas>=2.2.0
 matplotlib>=3.8.0
+tqdm>=4.66.0
 
 # Optional — only needed for the BrowserSession fallback (scraper/core/browser.py).
 # Install with: pip install playwright && python -m playwright install chromium

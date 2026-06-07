@@ -17,5 +17,7 @@ data/browser-profile/
 
 # Local-only notes — not for the public repo
 CLAUDE.md
+CLAUDE.md.bak
+docs/ARCHITECTURE.md
 PROJECT_OVERVIEW.md
 反馈/

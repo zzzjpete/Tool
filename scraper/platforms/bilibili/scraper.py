@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Callable, Optional
 
 from loguru import logger
 
@@ -16,6 +16,7 @@ from scraper.core.exceptions import (
     ScraperError,
     SoftBanned,
 )
+from scraper.core.progress import StepEvent, TotalEvent
 from scraper.platforms.bilibili.wbi import extract_keys_from_nav, sign_params
 
 
@@ -370,19 +371,29 @@ class BilibiliScraper(BaseScraper):
         comments_pages: int = 1,
         concurrency: int = 4,
         with_tags: bool = True,
+        only_new: bool = False,
+        progress: Optional[Callable[[Any], None]] = None,
     ) -> dict:
         """MediaCrawler-style search mode: keyword → top-N videos with full details.
 
-        Steps:
-          1. Open a `scrape_runs` row so this batch is identifiable later.
-          2. Search the keyword, collect the top `count` bvids.
-          3. For each bvid: link it into `keyword_posts` (so we can later query
-             "all posts ever pulled for this keyword"), fetch full video metadata
-             (and tags, if enabled), then comments.
+        `progress`, if given, is called per milestone with either a `str` (free-form
+        status line — back-compat), a `TotalEvent(total=N)` once after search resolves,
+        or a `StepEvent(ok=bool, error=str)` per item. Pass either; legacy string-only
+        consumers still work.
 
-        Returns a small summary dict; data lands in `bili_videos`, `bili_comments`,
-        `bili_search`, `keyword_posts`, `engagement_snapshots`, and `scrape_runs`.
+        `only_new=True` filters out post_ids already recorded under this keyword in
+        `keyword_posts`. Lets daily re-runs only pay quota for genuinely new posts.
+
+        Returns a summary dict with failure breakdown:
+          {keyword, videos, comments, requested, skipped, failed, errors, run_id}
         """
+        def _emit(item: Any) -> None:
+            if progress is None:
+                return
+            try:
+                progress(item)
+            except Exception:  # noqa: BLE001 — never let a bad UI callback break a scrape
+                pass
         run_id: Optional[int] = None
         if self.storage:
             run_id = await self.storage.start_run(
@@ -393,23 +404,48 @@ class BilibiliScraper(BaseScraper):
                     "comments_pages": comments_pages,
                     "concurrency": concurrency,
                     "with_tags": with_tags,
+                    "only_new": only_new,
                 },
             )
 
         comments_total = 0
         videos_done = 0
+        failed = 0
+        errors: dict[str, int] = {}
+        skipped = 0
         error_msg: Optional[str] = None
         try:
+            _emit(f"[B站] 搜索关键词 “{keyword}” …")
             pages_needed = max(1, (count + 19) // 20)
             hits = await self.search(keyword, pages=pages_needed)
             bvids = [h["bvid"] for h in hits if h.get("bvid")][:count]
+
+            if only_new and bvids and self.storage:
+                seen = await self.storage.keyword_post_ids(keyword=keyword, platform="bili")
+                before = len(bvids)
+                bvids = [b for b in bvids if b not in seen]
+                skipped = before - len(bvids)
+                if skipped:
+                    _emit(f"[B站] --only-new 跳过 {skipped} 个已抓过的视频")
+
             if not bvids:
-                logger.warning(
-                    "B站采集：关键词 {!r} 没搜到可用视频。可能是被风控、关键词太冷门 — "
-                    "跑一下 `python -m scraper doctor` 看看。",
-                    keyword,
-                )
-                return {"keyword": keyword, "videos": 0, "comments": 0, "run_id": run_id}
+                if only_new and skipped > 0:
+                    _emit(f"[B站] 没有新视频（{skipped} 个都已抓过）")
+                else:
+                    logger.warning(
+                        "B站采集：关键词 {!r} 没搜到可用视频。可能是被风控、关键词太冷门 — "
+                        "跑一下 `python -m scraper doctor` 看看。",
+                        keyword,
+                    )
+                    _emit(f"[B站] 没搜到可用视频（可能被风控/关键词冷门）")
+                return {
+                    "keyword": keyword, "videos": 0, "comments": 0,
+                    "requested": count, "skipped": skipped,
+                    "failed": 0, "errors": {}, "run_id": run_id,
+                }
+            _emit(f"[B站] 搜到 {len(bvids)} 个视频，开始抓取（并发 {concurrency}）")
+
+            _emit(TotalEvent(total=len(bvids), label=f"B站 · {keyword}"))
 
             # Record the keyword→post linkage up front so the run row reflects
             # intent even if the per-video fetches fail.
@@ -421,33 +457,48 @@ class BilibiliScraper(BaseScraper):
                     )
 
             sem = asyncio.Semaphore(concurrency)
+            total = len(bvids)
+            finished = 0  # increments under asyncio single-thread — no lock needed
 
             async def _one(bvid: str) -> None:
-                nonlocal comments_total, videos_done
+                nonlocal comments_total, videos_done, finished, failed
                 async with sem:
                     try:
                         await self.get_video(bvid, with_tags=with_tags)
                         videos_done += 1
+                        n = 0
                         if comments_pages > 0:
-                            n = 0
                             async for _ in self.iter_comments(bvid, pages=comments_pages):
                                 n += 1
                             comments_total += n
+                        finished += 1
+                        _emit(f"[B站] 视频 {finished}/{total} ✓ {bvid}  评论 {n}")
+                        _emit(StepEvent(ok=True, extra={"comments": n}))
                     except ScraperError as e:
+                        finished += 1
+                        failed += 1
+                        err_name = type(e).__name__
+                        errors[err_name] = errors.get(err_name, 0) + 1
                         logger.warning(
                             "B站采集：视频 {} 抓取失败（关键词 {!r}）：{}",
                             bvid, keyword, e,
                         )
+                        _emit(f"[B站] 视频 {finished}/{total} ✗ {bvid}  ({err_name})")
+                        _emit(StepEvent(ok=False, error=err_name))
 
             await asyncio.gather(*[_one(b) for b in bvids])
             logger.info(
-                "bili scrape: keyword={!r} videos={} comments={}",
-                keyword, videos_done, comments_total,
+                "bili scrape: keyword={!r} videos={} comments={} failed={}",
+                keyword, videos_done, comments_total, failed,
             )
             return {
                 "keyword": keyword,
                 "videos": videos_done,
                 "comments": comments_total,
+                "requested": count,
+                "skipped": skipped,
+                "failed": failed,
+                "errors": errors,
                 "run_id": run_id,
             }
         except Exception as e:

@@ -198,6 +198,75 @@ SCHEMA = [
         fetched_at INTEGER DEFAULT (strftime('%s','now'))
     )
     """,
+    # --- Weibo (m.weibo.cn) ---------------------------------------------------
+    # `id` is the numeric status id (stringified); `mblogid` is the base-62 bid
+    # used in weibo.com/<uid>/<bid> links. created_ts is best-effort epoch parsed
+    # from Weibo's messy created_at string (which is kept raw alongside).
+    """
+    CREATE TABLE IF NOT EXISTS weibo_posts (
+        id TEXT PRIMARY KEY,
+        mblogid TEXT,
+        user_id TEXT,
+        user_name TEXT,
+        text TEXT,
+        created_at TEXT,
+        created_ts INTEGER,
+        source TEXT,
+        reposts_count INTEGER,
+        comments_count INTEGER,
+        attitudes_count INTEGER,
+        raw TEXT,
+        fetched_at INTEGER DEFAULT (strftime('%s','now'))
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS weibo_comments (
+        comment_id TEXT PRIMARY KEY,
+        post_id TEXT,
+        user_id TEXT,
+        user_name TEXT,
+        text TEXT,
+        like_count INTEGER,
+        created_at TEXT,
+        created_ts INTEGER,
+        raw TEXT,
+        fetched_at INTEGER DEFAULT (strftime('%s','now'))
+    )
+    """,
+    # --- Baidu Tieba ----------------------------------------------------------
+    # `tid` is the thread id (kz). tieba_comments holds reply floors (2..N), keyed
+    # by the reply/post id (pid). content is plain text extracted from the segment
+    # list the mobile API returns; raw keeps the full payload.
+    """
+    CREATE TABLE IF NOT EXISTS tieba_threads (
+        tid TEXT PRIMARY KEY,
+        title TEXT,
+        author_name TEXT,
+        author_id TEXT,
+        forum_name TEXT,
+        content TEXT,
+        reply_num INTEGER,
+        created_at TEXT,
+        created_ts INTEGER,
+        url TEXT,
+        raw TEXT,
+        fetched_at INTEGER DEFAULT (strftime('%s','now'))
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS tieba_comments (
+        pid TEXT PRIMARY KEY,
+        tid TEXT,
+        floor INTEGER,
+        author_name TEXT,
+        author_id TEXT,
+        content TEXT,
+        created_at TEXT,
+        created_ts INTEGER,
+        raw TEXT,
+        fetched_at INTEGER DEFAULT (strftime('%s','now'))
+    )
+    """,
     # --- ML-facing unified views ---------------------------------------------
     # Chinese column names matching the MediaCrawler-style export schema so the
     # output is directly usable in analysis notebooks. Underlying tables stay
@@ -261,6 +330,42 @@ SCHEMA = [
         NULL                                                AS 播放数量,
         fetched_at                                          AS 抓取时间
     FROM zhihu_answers
+    UNION ALL
+    SELECT
+        'weibo'                                             AS 平台,
+        id                                                  AS 帖子ID,
+        'https://m.weibo.cn/detail/' || id                  AS 笔记链接,
+        user_id                                             AS 作者ID,
+        user_name                                           AS 作者昵称,
+        created_ts                                          AS 发布时间,
+        NULL                                                AS 标题,
+        text                                                AS 内容,
+        NULL                                                AS 标签,
+        comments_count                                      AS 评论数量,
+        attitudes_count                                     AS 点赞数量,
+        NULL                                                AS 收藏数量,
+        reposts_count                                       AS 转发数量,
+        NULL                                                AS 播放数量,
+        fetched_at                                          AS 抓取时间
+    FROM weibo_posts
+    UNION ALL
+    SELECT
+        'tieba'                                             AS 平台,
+        tid                                                 AS 帖子ID,
+        'https://tieba.baidu.com/p/' || tid                 AS 笔记链接,
+        author_id                                           AS 作者ID,
+        author_name                                         AS 作者昵称,
+        created_ts                                          AS 发布时间,
+        title                                               AS 标题,
+        content                                             AS 内容,
+        forum_name                                          AS 标签,
+        reply_num                                           AS 评论数量,
+        NULL                                                AS 点赞数量,
+        NULL                                                AS 收藏数量,
+        NULL                                                AS 转发数量,
+        NULL                                                AS 播放数量,
+        fetched_at                                          AS 抓取时间
+    FROM tieba_threads
     """,
     """
     DROP VIEW IF EXISTS comments_unified
@@ -290,6 +395,30 @@ SCHEMA = [
         like_count                                          AS 点赞数量,
         fetched_at                                          AS 抓取时间
     FROM zhihu_answer_comments
+    UNION ALL
+    SELECT
+        'weibo'                                             AS 平台,
+        post_id                                             AS 帖子ID,
+        comment_id                                          AS 评论ID,
+        user_id                                             AS 作者ID,
+        user_name                                           AS 作者昵称,
+        created_ts                                          AS 发布时间,
+        text                                                AS 内容,
+        like_count                                          AS 点赞数量,
+        fetched_at                                          AS 抓取时间
+    FROM weibo_comments
+    UNION ALL
+    SELECT
+        'tieba'                                             AS 平台,
+        tid                                                 AS 帖子ID,
+        pid                                                 AS 评论ID,
+        author_id                                           AS 作者ID,
+        author_name                                         AS 作者昵称,
+        created_ts                                          AS 发布时间,
+        content                                             AS 内容,
+        NULL                                                AS 点赞数量,
+        fetched_at                                          AS 抓取时间
+    FROM tieba_comments
     """,
     # Convenience: posts joined to the keywords that brought them in. Many-to-many.
     """
@@ -410,6 +539,20 @@ class SqliteStorage:
             (posts_fetched, comments_fetched, error, run_id),
         )
         await self.db.commit()
+
+    async def keyword_post_ids(self, *, keyword: str, platform: str) -> set[str]:
+        """Return the set of post_ids already linked to `keyword` for `platform`.
+
+        Used by the `only_new` scrape mode to skip post_ids we've already pulled
+        for this keyword on prior runs — saves rate-limit quota on daily re-runs.
+        """
+        cur = await self.db.execute(
+            "SELECT DISTINCT post_id FROM keyword_posts WHERE keyword = ? AND platform = ?",
+            (keyword, platform),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+        return {r[0] for r in rows if r[0] is not None}
 
     async def record_keyword_post(
         self,

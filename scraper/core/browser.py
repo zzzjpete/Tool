@@ -149,16 +149,31 @@ class BrowserSession:
             await self._pw.stop()
             self._pw = None
 
-    async def get_html(self, url: str, *, wait_for: Optional[str] = None) -> str:
+    async def get_html(
+        self,
+        url: str,
+        *,
+        wait_for: Optional[str] = None,
+        wait_until: str = "load",
+        timeout_ms: int = 30_000,
+    ) -> str:
         """Navigate to `url` and return the fully-rendered HTML.
 
         `wait_for` is an optional CSS selector to wait for before reading content —
         use it when the page renders asynchronously after initial load.
+
+        `wait_until` controls how long goto() blocks. `"load"` waits for every
+        subresource (images, ads, iframes) — correct for pages whose content is
+        painted late, but on ad-heavy sites the load event can take >30s and time
+        out. For pages whose payload is server-rendered into the initial HTML
+        (e.g. Zhihu's `js-initialData` blob), pass `"domcontentloaded"`: it fires
+        as soon as the HTML is parsed (1–3s), which is all we need to read the SSR
+        JSON — and it sidesteps the slow-load timeout entirely.
         """
         await self._bucket.acquire()
         page = await self._require_context().new_page()
         try:
-            await page.goto(url, wait_until="load")
+            await page.goto(url, wait_until=wait_until, timeout=timeout_ms)
             await _settle(page)
             if wait_for:
                 await page.wait_for_selector(wait_for, timeout=10_000)

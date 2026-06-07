@@ -87,8 +87,8 @@ def posts_for_keyword(
     plat_clause = ""
     params: list[Any] = [keyword]
     if platforms:
-        # keyword_posts.platform is 'bili' or 'zhihu'; posts_unified.平台 includes
-        # 'zhihu_question' and 'zhihu_answer' — map accordingly.
+        # keyword_posts.platform is 'bili'/'zhihu'/'weibo'/'tieba'; posts_unified.平台
+        # splits Zhihu into 'zhihu_question'/'zhihu_answer' — map accordingly below.
         plat_clause = " AND (" + " OR ".join(
             ["kp.platform = ?"] * len(platforms)
         ) + ")"
@@ -101,6 +101,8 @@ def posts_for_keyword(
          AND (
               (kp.platform = 'bili' AND pu.平台 = 'bili')
            OR (kp.platform = 'zhihu' AND pu.平台 IN ('zhihu_question','zhihu_answer'))
+           OR (kp.platform = 'weibo' AND pu.平台 = 'weibo')
+           OR (kp.platform = 'tieba' AND pu.平台 = 'tieba')
          )
         WHERE kp.keyword = ?{plat_clause}
         ORDER BY pu.发布时间 DESC
@@ -243,6 +245,277 @@ def answers_for_keyword(
         return pd.read_sql_query(sql, db, params=[keyword])
 
 
+def comments_for_keyword(
+    keyword: str,
+    *,
+    db_path: Optional[str | Path] = None,
+) -> Any:
+    """All comments under posts brought in by this keyword (both platforms).
+
+    Mirrors the comment-matching logic in `export_run_to_csv`, but keyed by
+    keyword instead of run_id — so it spans every run that scraped this keyword.
+    Bili comments match on the video's aid (keyword_posts stores the bvid);
+    Zhihu answer comments match on answers under this keyword's questions.
+    """
+    pd = _pandas()
+    sql = """
+        SELECT cu.*
+        FROM comments_unified cu
+        WHERE
+          (cu.平台 = 'bili' AND cu.帖子ID IN (
+              SELECT CAST(v.aid AS TEXT) FROM bili_videos v
+              JOIN keyword_posts kp ON kp.post_id = v.bvid
+              WHERE kp.keyword = ?
+          ))
+          OR
+          (cu.平台 = 'zhihu_answer' AND cu.帖子ID IN (
+              SELECT CAST(a.id AS TEXT)
+              FROM zhihu_answers a
+              JOIN keyword_posts kp ON kp.post_id = CAST(a.question_id AS TEXT)
+              WHERE kp.keyword = ?
+          ))
+          OR
+          -- weibo / tieba comments hang directly off the post (keyword_posts.post_id),
+          -- so the match is a straight post_id membership test.
+          (cu.平台 = 'weibo' AND cu.帖子ID IN (
+              SELECT post_id FROM keyword_posts WHERE keyword = ? AND platform = 'weibo'
+          ))
+          OR
+          (cu.平台 = 'tieba' AND cu.帖子ID IN (
+              SELECT post_id FROM keyword_posts WHERE keyword = ? AND platform = 'tieba'
+          ))
+        ORDER BY cu.点赞数量 DESC
+    """
+    with _connect(db_path) as db:
+        return pd.read_sql_query(sql, db, params=[keyword, keyword, keyword, keyword])
+
+
+# ---- Sentiment / NLP analysis ---------------------------------------------
+
+_SENTIMENT_COLUMNS = [
+    "平台", "类型", "帖子ID", "发布时间", "文本", "情感得分", "情感标签", "正面词数", "负面词数",
+]
+
+
+def _collect_texts(
+    keyword: str,
+    *,
+    sources: tuple[str, ...],
+    db_path: Optional[str | Path],
+) -> dict[str, Any]:
+    """Pull the raw DataFrames feeding the NLP layer for one keyword.
+
+    Returns a dict with whichever of 'posts' / 'answers' / 'comments' were asked
+    for. Centralizes the source selection so sentiment + keyword helpers agree.
+    """
+    out: dict[str, Any] = {}
+    if "posts" in sources:
+        out["posts"] = posts_for_keyword(keyword, db_path=db_path)
+    if "answers" in sources:
+        out["answers"] = answers_for_keyword(keyword, db_path=db_path)
+    if "comments" in sources:
+        out["comments"] = comments_for_keyword(keyword, db_path=db_path)
+    return out
+
+
+def _row_texts(df: Any, *cols: str) -> list[str]:
+    """Row-wise concat of `cols` into plain strings, NaN/None-safe.
+
+    Avoids a pandas string-op pitfall: an all-NULL SQLite column reads back as
+    float64, where ``series.fillna("") + " "`` raises a TypeError. We build the
+    list in Python from records instead, coercing each cell defensively.
+    """
+    import math
+
+    out: list[str] = []
+    for rec in df.to_dict("records"):
+        parts: list[str] = []
+        for c in cols:
+            v = rec.get(c)
+            if v is None:
+                continue
+            if isinstance(v, float) and math.isnan(v):
+                continue
+            s = str(v).strip()
+            if s and s.lower() != "nan":
+                parts.append(s)
+        out.append(" ".join(parts))
+    return out
+
+
+def _score_frame(df: Any, texts: list[str], kind: str) -> Any:
+    """Score a parallel list of texts and attach metadata from `df` (row-aligned).
+
+    `texts[i]` is the text to score for `df`'s i-th row. Returns a DataFrame with
+    the `_SENTIMENT_COLUMNS` shape.
+    """
+    pd = _pandas()
+    from scraper import nlp
+
+    records = df.to_dict("records")
+    rows: list[dict[str, Any]] = []
+    for rec, text in zip(records, texts):
+        cleaned = nlp.clean_text(text)
+        if not cleaned:
+            # Content-less row (e.g. an image-only answer): skip it rather than
+            # scoring "" as 中性, which would inflate the neutral count with non-samples.
+            continue
+        res = nlp.sentiment(cleaned)
+        rows.append({
+            "平台": rec.get("平台"),
+            "类型": kind,
+            "帖子ID": rec.get("帖子ID"),
+            "发布时间": rec.get("发布时间"),
+            "文本": cleaned[:120],
+            "情感得分": res.score,
+            "情感标签": res.label,
+            "正面词数": res.pos_hits,
+            "负面词数": res.neg_hits,
+        })
+    return pd.DataFrame(rows, columns=_SENTIMENT_COLUMNS)
+
+
+def sentiment_for_keyword(
+    keyword: str,
+    *,
+    sources: tuple[str, ...] = ("posts", "answers", "comments"),
+    db_path: Optional[str | Path] = None,
+) -> Any:
+    """Per-text-unit sentiment for one keyword.
+
+    One row per scored unit: posts (标题+内容), Zhihu answers (HTML stripped), and
+    comments. Columns: 平台/类型/帖子ID/发布时间/文本/情感得分/情感标签/正面词数/负面词数.
+    `情感得分` is in [-1, 1]; `情感标签` is 正面/中性/负面 (see `scraper.nlp`).
+    """
+    pd = _pandas()
+    data = _collect_texts(keyword, sources=sources, db_path=db_path)
+    frames: list[Any] = []
+
+    posts = data.get("posts")
+    if posts is not None and not posts.empty:
+        frames.append(_score_frame(posts, _row_texts(posts, "标题", "内容"), "帖子"))
+
+    answers = data.get("answers")
+    if answers is not None and not answers.empty:
+        frames.append(_score_frame(answers, _row_texts(answers, "内容"), "回答"))
+
+    comments = data.get("comments")
+    if comments is not None and not comments.empty:
+        frames.append(_score_frame(comments, _row_texts(comments, "内容"), "评论"))
+
+    if not frames:
+        return pd.DataFrame(columns=_SENTIMENT_COLUMNS)
+    return pd.concat(frames, ignore_index=True)
+
+
+def sentiment_summary(
+    keyword: str,
+    *,
+    sources: tuple[str, ...] = ("posts", "answers", "comments"),
+    db_path: Optional[str | Path] = None,
+) -> Any:
+    """One-row aggregate of sentiment for a keyword: counts, 占比, mean, 倾向."""
+    pd = _pandas()
+    from scraper import nlp
+
+    df = sentiment_for_keyword(keyword, sources=sources, db_path=db_path)
+    cols = ["样本数", "正面", "中性", "负面", "正面占比", "负面占比", "平均情感得分", "情感倾向"]
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+    n = len(df)
+    counts = df["情感标签"].value_counts()
+    pos = int(counts.get(nlp.LABEL_POS, 0))
+    neu = int(counts.get(nlp.LABEL_NEUTRAL, 0))
+    neg = int(counts.get(nlp.LABEL_NEG, 0))
+    mean_score = float(df["情感得分"].mean())
+    return pd.DataFrame([{
+        "样本数": n,
+        "正面": pos,
+        "中性": neu,
+        "负面": neg,
+        "正面占比": round(pos / n, 3),
+        "负面占比": round(neg / n, 3),
+        "平均情感得分": round(mean_score, 3),
+        "情感倾向": nlp.label_for(mean_score),
+    }], columns=cols)
+
+
+def sentiment_by_day(
+    keyword: str,
+    *,
+    sources: tuple[str, ...] = ("posts", "answers", "comments"),
+    db_path: Optional[str | Path] = None,
+) -> Any:
+    """Daily sentiment trend for a keyword, grouped by publish date (发布时间).
+
+    Columns: 日期 / 样本数 / 平均情感得分 / 正面 / 中性 / 负面.
+
+    `平均情感得分` is an *unweighted* mean of each day's per-text-unit scores — a
+    one-line comment counts the same as a 5000-word answer. Fine for trend shape;
+    if you need length/engagement-weighted sentiment, aggregate from
+    `sentiment_for_keyword` yourself.
+    """
+    pd = _pandas()
+    from scraper import nlp
+
+    df = sentiment_for_keyword(keyword, sources=sources, db_path=db_path)
+    cols = ["日期", "样本数", "平均情感得分", "正面", "中性", "负面"]
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+    df = df.dropna(subset=["发布时间"]).copy()
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+    df["日期"] = pd.to_datetime(df["发布时间"], unit="s").dt.date.astype(str)
+    agg = (
+        df.groupby("日期")
+        .agg(
+            样本数=("情感得分", "count"),
+            平均情感得分=("情感得分", "mean"),
+            正面=("情感标签", lambda s: int((s == nlp.LABEL_POS).sum())),
+            中性=("情感标签", lambda s: int((s == nlp.LABEL_NEUTRAL).sum())),
+            负面=("情感标签", lambda s: int((s == nlp.LABEL_NEG).sum())),
+        )
+        .reset_index()
+        .sort_values("日期")
+        .reset_index(drop=True)
+    )
+    agg["平均情感得分"] = agg["平均情感得分"].round(3)
+    return agg
+
+
+def top_keywords(
+    keyword: str,
+    *,
+    topK: int = 30,
+    sources: tuple[str, ...] = ("posts", "answers", "comments"),
+    db_path: Optional[str | Path] = None,
+) -> Any:
+    """TF-IDF hot words across this keyword's corpus. Columns: 词 / 权重.
+
+    The search keyword itself is excluded so it doesn't dominate its own report.
+    May return FEWER than `topK` rows: `nlp.keywords` over-fetches then drops
+    stopwords / single chars / pure-ASCII tokens, so a thin corpus can come up
+    short. `viz.keyword_bar`'s title shows the actual count, not the request.
+    """
+    pd = _pandas()
+    from scraper import nlp
+
+    data = _collect_texts(keyword, sources=sources, db_path=db_path)
+    texts: list[str] = []
+    posts = data.get("posts")
+    if posts is not None and not posts.empty:
+        texts += _row_texts(posts, "标题", "内容")
+    answers = data.get("answers")
+    if answers is not None and not answers.empty:
+        texts += _row_texts(answers, "内容")
+    comments = data.get("comments")
+    if comments is not None and not comments.empty:
+        texts += _row_texts(comments, "内容")
+
+    pairs = nlp.keywords(texts, topK=topK, exclude=[keyword])
+    return pd.DataFrame(pairs, columns=["词", "权重"])
+
+
 def export_run_to_csv(
     run_id: int,
     *,
@@ -328,10 +601,19 @@ def export_run_to_csv(
                     ON kp.post_id = CAST(a.question_id AS TEXT)
                   WHERE kp.run_id = ?
               ))
+              OR
+              -- weibo / tieba comments hang directly off the post id in this run
+              (cu.平台 = 'weibo' AND cu.帖子ID IN (
+                  SELECT post_id FROM keyword_posts WHERE run_id = ? AND platform = 'weibo'
+              ))
+              OR
+              (cu.平台 = 'tieba' AND cu.帖子ID IN (
+                  SELECT post_id FROM keyword_posts WHERE run_id = ? AND platform = 'tieba'
+              ))
             ORDER BY 平台, 点赞数量 DESC
         """
         with _connect(db_path) as db:
-            comments_df = pd.read_sql_query(comments_sql, db, params=[run_id, run_id])
+            comments_df = pd.read_sql_query(comments_sql, db, params=[run_id, run_id, run_id, run_id])
         if not comments_df.empty:
             comments_path = out / f"{safe_kw}_run{run_id}_comments.csv"
             comments_df.to_csv(comments_path, index=False, encoding="utf-8-sig")
@@ -344,8 +626,13 @@ __all__ = [
     "posts_for_keyword",
     "answers_for_keyword",
     "comments_for_post",
+    "comments_for_keyword",
     "volume_by_day",
     "engagement_history",
     "scrape_run_summary",
     "export_run_to_csv",
+    "sentiment_for_keyword",
+    "sentiment_summary",
+    "sentiment_by_day",
+    "top_keywords",
 ]

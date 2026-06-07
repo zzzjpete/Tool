@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Callable, Optional
 
 from bs4 import BeautifulSoup
 from loguru import logger
@@ -17,6 +17,7 @@ from scraper.core.exceptions import (
     ScraperError,
     SoftBanned,
 )
+from scraper.core.progress import StepEvent, TotalEvent
 
 
 _INITIAL_DATA_RE = re.compile(
@@ -324,6 +325,8 @@ class ZhihuScraper(BaseScraper):
         answers_per_question: int = 5,
         comments_per_answer: int = 0,
         concurrency: int = 3,
+        only_new: bool = False,
+        progress: Optional[Callable[[Any], None]] = None,
     ) -> dict:
         """MediaCrawler-style search mode: keyword → top-N questions with top answers.
 
@@ -341,8 +344,21 @@ class ZhihuScraper(BaseScraper):
         Concurrency is capped at 1 here regardless of the parameter — browser
         pages share the same context and parallel navigations destabilize playwright
         under stealth. The shared token bucket still rate-limits.
+
+        `progress`, if given, is called with one short Chinese status line at each
+        milestone (search done, per-question completion). Used by the CLI so users
+        see live progress instead of going silent for minutes.
         """
+        def _emit(item: Any) -> None:
+            if progress is None:
+                return
+            try:
+                progress(item)
+            except Exception:  # noqa: BLE001 — never let a bad UI callback break a scrape
+                pass
+
         self._require_cookie()
+        _emit(f"[知乎] 搜索关键词 “{keyword}” …")
         # 20 per search page — request enough to fill `count` after kind-filtering.
         pages_needed = max(1, (count * 2 + 19) // 20)
         hits = await self.search(keyword, pages=pages_needed)
@@ -372,13 +388,33 @@ class ZhihuScraper(BaseScraper):
                 question_ids.append(qid)
             if len(question_ids) >= count:
                 break
+
+        skipped = 0
+        if only_new and question_ids and self.storage:
+            seen_qids = await self.storage.keyword_post_ids(keyword=keyword, platform="zhihu")
+            before = len(question_ids)
+            question_ids = [q for q in question_ids if str(q) not in seen_qids]
+            skipped = before - len(question_ids)
+            if skipped:
+                _emit(f"[知乎] --only-new 跳过 {skipped} 个已抓过的问题")
+
         if not question_ids:
-            logger.warning(
-                "知乎采集：关键词 {!r} 没搜到任何问题。可能是被风控、关键词太冷门、"
-                "或 cookie 失效 — 跑一下 `python -m scraper doctor` 看看。",
-                keyword,
-            )
-            return {"keyword": keyword, "questions": 0, "answers": 0, "run_id": None}
+            if only_new and skipped > 0:
+                _emit(f"[知乎] 没有新问题（{skipped} 个都已抓过）")
+            else:
+                logger.warning(
+                    "知乎采集：关键词 {!r} 没搜到任何问题。可能是被风控、关键词太冷门、"
+                    "或 cookie 失效 — 跑一下 `python -m scraper doctor` 看看。",
+                    keyword,
+                )
+                _emit(f"[知乎] 没搜到任何问题（可能被风控/cookie 失效/关键词冷门）")
+            return {
+                "keyword": keyword, "questions": 0, "answers": 0,
+                "comments": 0, "requested": count, "skipped": skipped,
+                "failed": 0, "errors": {}, "run_id": None,
+            }
+        _emit(f"[知乎] 搜到 {len(question_ids)} 个问题，开始抓取（浏览器渲染，约 1–2 秒/个）")
+        _emit(TotalEvent(total=len(question_ids), label=f"知乎 · {keyword}"))
 
         run_id: Optional[int] = None
         if self.storage:
@@ -389,6 +425,7 @@ class ZhihuScraper(BaseScraper):
                 config={
                     "answers_per_question": answers_per_question,
                     "concurrency": concurrency,
+                    "only_new": only_new,
                 },
             )
             for rank, qid in enumerate(question_ids, start=1):
@@ -403,6 +440,8 @@ class ZhihuScraper(BaseScraper):
         answers_total = 0
         comments_total = 0
         questions_done = 0
+        failed = 0
+        errors: dict[str, int] = {}
         error_msg: Optional[str] = None
         try:
             async with BrowserSession(
@@ -414,34 +453,55 @@ class ZhihuScraper(BaseScraper):
                 # session look like a returning browser, not a brand-new install.
                 user_data_dir="data/browser-profile/zhihu",
             ) as browser:
-                for qid in question_ids:
+                total = len(question_ids)
+                for idx, qid in enumerate(question_ids, start=1):
                     try:
                         ans_ids = await self._fetch_question_via_browser(
                             browser, qid, max_answers=answers_per_question,
                         )
                         answers_total += len(ans_ids)
                         questions_done += 1
-                        if comments_per_answer > 0:
+                        kept_here = 0
+                        if comments_per_answer > 0 and ans_ids:
+                            _emit(f"[知乎] 问题 {idx}/{total} 抓评论中…（{len(ans_ids)} 个回答 × 最多 {comments_per_answer} 条）")
                             for aid in ans_ids:
                                 kept = await self.fetch_answer_comments_via_browser(
                                     browser, qid, aid, max_comments=comments_per_answer,
                                 )
                                 comments_total += kept
+                                kept_here += kept
+                        _emit(
+                            f"[知乎] 问题 {idx}/{total} ✓ {qid}  回答 {len(ans_ids)}"
+                            + (f"  评论 {kept_here}" if comments_per_answer > 0 else "")
+                        )
+                        _emit(StepEvent(
+                            ok=True,
+                            extra={"answers": len(ans_ids), "comments": kept_here},
+                        ))
                     except ScraperError as e:
+                        failed += 1
+                        err_name = type(e).__name__
+                        errors[err_name] = errors.get(err_name, 0) + 1
                         logger.warning(
                             "知乎采集：问题 {} 抓取失败（关键词 {!r}）：{}",
                             qid, keyword, e,
                         )
+                        _emit(f"[知乎] 问题 {idx}/{total} ✗ {qid}  ({err_name})")
+                        _emit(StepEvent(ok=False, error=err_name))
 
             logger.info(
-                "zhihu scrape: keyword={!r} questions={} answers={} comments={}",
-                keyword, questions_done, answers_total, comments_total,
+                "zhihu scrape: keyword={!r} questions={} answers={} comments={} failed={}",
+                keyword, questions_done, answers_total, comments_total, failed,
             )
             return {
                 "keyword": keyword,
                 "questions": questions_done,
                 "answers": answers_total,
                 "comments": comments_total,
+                "requested": count,
+                "skipped": skipped,
+                "failed": failed,
+                "errors": errors,
                 "run_id": run_id,
             }
         except Exception as e:
@@ -567,7 +627,23 @@ class ZhihuScraper(BaseScraper):
         signed API.
         """
         url = f"https://www.zhihu.com/question/{question_id}"
-        html = await browser.get_html(url)
+        try:
+            # domcontentloaded (not the default "load"): the question's answers are
+            # server-rendered into the js-initialData blob, so we only need the parsed
+            # HTML — waiting for the full load event on Zhihu's ad-heavy pages times
+            # out at 30s far too often.
+            html = await browser.get_html(url, wait_until="domcontentloaded")
+        except ScraperError:
+            raise
+        except Exception as e:
+            # Playwright TimeoutError / network errors / etc. need to be re-raised
+            # as ScraperError so scrape_keyword's `except ScraperError` block treats
+            # them as a per-question failure (logs + continues) rather than letting
+            # them bubble up and kill the whole asyncio.gather batch.
+            raise ScraperError(
+                f"browser fetch failed for question {question_id}: "
+                f"{type(e).__name__}: {e}"
+            ) from e
         m = _INITIAL_DATA_RE.search(html)
         if not m:
             raise ParseError(f"no js-initialData script on {url}")
