@@ -1,11 +1,11 @@
 ================================================================================
               爬虫工具 — 使用说明
-              （Bilibili + Zhihu 数据采集与讨论热度分析）
+              （Bilibili / Zhihu / Weibo / 百度贴吧 数据采集与讨论热度分析）
 ================================================================================
 
-本工具用于按关键词从 Bilibili（B站）和 Zhihu（知乎）批量采集帖子、评论、点赞、
-收藏等数据，自动整理到 SQLite 数据库与 CSV 表格，方便后续做 ML 分析（如讨论
-热度趋势、内容聚类、情感分析等）。
+本工具用于按关键词从 Bilibili（B站）、Zhihu（知乎）、Weibo（微博）、百度贴吧
+批量采集帖子、评论、点赞、收藏等数据，自动整理到 SQLite 数据库与 CSV 表格，
+方便后续做 ML 分析（如讨论热度趋势、内容聚类、情感分析等）。
 
 下面按"准备 → 基本使用 → 高级用法 → 分析数据 → 常见问题"的顺序讲解。
 所有命令请在项目根目录的 PowerShell 中执行。
@@ -50,8 +50,10 @@
 
 1.4 浏览器登录获取 Cookie（推荐 — 比手动复制简单）
 --------------------------------------------------------------------------------
-      python -m scraper login zhihu        # 登录知乎
+      python -m scraper login zhihu        # 登录知乎（最常用）
+      python -m scraper login weibo        # 登录微博（搜索需要 SUB cookie）
       python -m scraper login bilibili     # 登录 B 站（可选）
+      python -m scraper login tieba        # 登录贴吧（可选，匿名也能用）
 
   运行后：
     1. 程序自动弹出 Chromium 浏览器窗口
@@ -67,7 +69,7 @@
 
       copy config.example.yaml config.yaml
 
-  用记事本或 VS Code 打开 config.yaml，重点关注两段：
+  用记事本或 VS Code 打开 config.yaml，重点关注这几段：
 
   【Bilibili 部分】（可选，匿名也能采集大部分公开接口）
       bilibili:
@@ -76,6 +78,14 @@
   【Zhihu 部分】（必填，否则无法采集）
       zhihu:
         cookie: "_xsrf=...; z_c0=...; ..."    # 必须包含 z_c0
+
+  【Weibo 部分】（关键词搜索必填，需含 SUB；留空则采集时自动跳过微博）
+      weibo:
+        cookie: "SUB=...; ..."
+
+  【Tieba 部分】（可选，匿名即可采集；BDUSS 仅在高频采集时有帮助）
+      tieba:
+        cookie: ""
 
   手动获取 Zhihu Cookie 的步骤：
     1. 打开 https://www.zhihu.com 并登录
@@ -99,7 +109,6 @@
   Playwright（真实浏览器内核）来跑知乎相关的页面。
   浏览器登录命令 `login` 也依赖 Playwright。
   `python -m scraper` 或 `init` 会自动提示是否安装，无需手动操作。
-  （想了解技术细节请看 CLAUDE.md — 关键词 "x-zse-96"）
 
   如果想手动安装：
 
@@ -156,7 +165,7 @@
 
 2.2 一键命令（适合熟悉参数后或定时任务）
 --------------------------------------------------------------------------------
-  跨平台同时采集（B站 + 知乎并行）：
+  跨平台同时采集（默认 B站 + 知乎 + 微博 + 贴吧 四平台并行）：
       python -m scraper scrape "电动车" --count 20
 
   只采集 B 站：
@@ -164,6 +173,15 @@
 
   只采集知乎：
       python -m scraper zhihu scrape "电动车" --count 10 --answers-per-q 5
+
+  只采集微博：
+      python -m scraper weibo scrape "电动车" --count 20 --comments 10
+
+  只采集贴吧：
+      python -m scraper tieba scrape "电动车" --count 20 --replies 10
+
+  限定部分平台（逗号分隔）：
+      python -m scraper scrape "电动车" --platforms weibo,tieba --count 10
 
   多个关键词（空格分隔）：
       python -m scraper scrape "电动车" "新能源" "比亚迪" --count 15
@@ -179,11 +197,14 @@
   通用参数：
     --count N             每个平台、每个关键词采集 N 个帖子（默认 10）
     --csv / --no-csv      是否自动导出 CSV（默认 --csv）
-    --platforms LIST      限定平台，例如 --platforms bili 只跑 B 站
+    --report / --no-report 采集后是否生成 HTML 报告（默认 --no-report）
+    --only-new            跳过已采过的帖子，只补新内容
+    --platforms LIST      限定平台，逗号分隔，可选 bili,zhihu,weibo,tieba
+                          （默认四个全跑），例如 --platforms bili,weibo
 
   Bilibili 专用：
     --comments-pages N    每个视频采集多少页评论，0 表示不采（默认 1）
-    --concurrency N       并发数（默认 4）
+    --concurrency N       并发数（默认 4，仅 bili/zhihu 单平台子命令支持）
 
   Zhihu 专用：
     --answers-per-q N     每个问题最多采集多少回答（默认 5）
@@ -191,6 +212,12 @@
                           每个回答采集多少条评论。0 表示不采（默认 0）。
                           ⚠ 此选项较慢，因为需要用浏览器模拟滚动+点击触发
                           知乎的懒加载，每条回答多花 3–5 秒。
+
+  Weibo 专用：
+    --weibo-comments N    每条微博采集多少条评论，0 表示不采（默认 0）
+
+  Tieba 专用：
+    --tieba-replies N     每个帖子采集多少层回复，0 表示不采（默认 0）
 
 
 ================================================================================
@@ -217,6 +244,7 @@
       python -m scraper view <类型> <ID>
 
   类型可选：video / dynamic / question / answer / article / column / comment
+            / weibo / thread
 
   示例：
       python -m scraper view video BV1xx411c7XW         # 看一个 B 站视频
@@ -322,6 +350,14 @@
     zhihu_articles           专栏文章
     zhihu_search             搜索结果记录
 
+  Weibo 相关：
+    weibo_posts              微博正文（含转发/评论/点赞数）
+    weibo_comments           微博评论
+
+  Tieba 相关：
+    tieba_threads            贴吧主题帖
+    tieba_comments           帖子楼层回复
+
   机器学习/分析专用：
     scrape_runs              每次 scrape 命令的运行记录
                              （时间、关键词、采集量、错误信息）
@@ -353,7 +389,7 @@
       $action = New-ScheduledTaskAction `
           -Execute "python" `
           -Argument "-m scraper scrape `"电动车`" `"新能源`" --count 20" `
-          -WorkingDirectory "C:\Users\Jinxi Zhang\Desktop\爬虫工具 （开发中）"
+          -WorkingDirectory "C:\path\to\爬虫工具"   # ← 改成你自己的项目路径
       $trigger = New-ScheduledTaskTrigger -Daily -At 9am
       Register-ScheduledTask -TaskName "DailyScrape" `
           -Action $action -Trigger $trigger
@@ -475,7 +511,7 @@
   A: 本工具**仅适合个人研究 / 学术分析等非商业场景**。
 
      使用前请确认：
-     • 遵守 B 站和知乎的服务条款及 robots.txt
+     • 遵守各平台（B站 / 知乎 / 微博 / 贴吧）的服务条款及 robots.txt
      • 不要把采集结果二次分发（原文、原图、用户隐私）
      • 不要用于商业用途、广告投放、舆情监控售卖等
      • 数据分析结论可以发表，但**原始数据不要外传**
@@ -507,7 +543,7 @@
      4. 如果是 SoftBanned 反复出现 → 停 30 分钟再试；或者降速率到 0.3
      5. 删 `data/cookies/<platform>.json` 重新拿匿名 cookie（B 站常用）
      6. 换网络（连热点 / 换 IP）
-     7. 以上都不行 → 平台改接口了 — 看 CLAUDE.md 里的端点说明对一下
+     7. 以上都不行 → 多半是平台改了接口，需要更新对应平台的采集逻辑
 
 ---
 
@@ -569,7 +605,6 @@
   ├─ config.yaml                ← 你的本地配置（含 Cookie，不上传 Git）
   ├─ config.example.yaml        ← 示例配置（复制成 config.yaml）
   ├─ requirements.txt           ← Python 依赖
-  ├─ CLAUDE.md                  ← 给 AI 助手看的开发笔记（你也可以看）
   ├─ README.md                  ← 项目简介
   ├─ 使用说明.txt                ← ← 当前这份文档
   │
@@ -578,17 +613,22 @@
   │  ├─ cli.py                    所有 CLI 命令定义
   │  ├─ analyze.py                pandas 分析助手
   │  ├─ viz.py                    matplotlib 绘图助手
+  │  ├─ nlp.py                    中文情感分析 + jieba 热词（词典法）
+  │  ├─ report.py                 一键生成自包含 HTML 报告
   │  ├─ core/                     核心基础设施
   │  │  ├─ session.py               HTTP 会话（curl_cffi TLS 伪装、速率限制、
   │  │  │                            重试、UA/Sec-CH-UA/Sec-Fetch 头、Cookie 持久化）
   │  │  ├─ browser.py               Playwright 回退（双层 stealth、可选持久化 profile）
   │  │  ├─ storage.py               SQLite 存储 + 视图定义
   │  │  ├─ rate_limit.py            令牌桶限流
+  │  │  ├─ progress.py              采集进度事件（分阶段输出）
   │  │  ├─ config.py                config.yaml 加载
   │  │  └─ exceptions.py            异常定义
   │  └─ platforms/
   │     ├─ bilibili/                B 站采集逻辑 + WBI 签名
-  │     └─ zhihu/                   知乎采集逻辑
+  │     ├─ zhihu/                   知乎采集逻辑（含浏览器回退）
+  │     ├─ weibo/                   微博采集逻辑（m.weibo.cn）
+  │     └─ tieba/                   贴吧采集逻辑（免签名路径）
   │
   ├─ examples/
   │  ├─ scrape_bilibili_video.py    单文件示例：采视频+评论
@@ -617,9 +657,11 @@
   python -m scraper login zhihu                     | 浏览器登录抓 Cookie
   python -m scraper init                            | 首次设置向导
   python -m scraper doctor                          | 体检（缺啥提示啥）
-  python -m scraper scrape "kw" --count N           | 双平台一键采集（不交互）
+  python -m scraper scrape "kw" --count N           | 四平台一键采集（不交互）
   python -m scraper bili scrape "kw"                | 只采 B 站
   python -m scraper zhihu scrape "kw"               | 只采知乎
+  python -m scraper weibo scrape "kw"               | 只采微博
+  python -m scraper tieba scrape "kw"               | 只采贴吧
   python -m scraper status                          | 查看数据库状态
   python -m scraper view video <BVID>               | 查看单条记录
   python -m scraper export --format csv --table ... | 手动导出
@@ -631,7 +673,7 @@
   --comments-pages N                                | B 站每视频采 N 页评论
   --answers-per-q N                                 | 知乎每问题采 N 条回答
   --comments-per-answer N                           | 知乎每回答采 N 条评论
-  --platforms bili,zhihu                            | 选择平台
+  --platforms bili,zhihu,weibo,tieba                | 选择平台子集
   --no-csv                                          | 不自动导出 CSV
 
 
@@ -640,11 +682,11 @@
 ================================================================================
 
 如果遇到本说明没写到的问题，可以：
-  • 看 CLAUDE.md（更技术、更详细的开发笔记）
   • 看 data\scraper.log 里的错误堆栈
   • 用 python -m scraper status 看一下数据库现状
+  • 用 python -m scraper doctor 做一次体检
 
-本工具是个人/研究用途，请遵守 B 站与知乎的服务条款，不要过度抓取或商用。
+本工具是个人/研究用途，请遵守各平台的服务条款，不要过度抓取或商用。
 默认速率限制已经设得很保守，正常使用一般不会触发风控，但请也克制频次。
 
 祝研究顺利！

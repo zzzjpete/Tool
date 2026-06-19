@@ -79,7 +79,6 @@
 【更多】
 
   • 完整功能手册       使用说明.txt
-  • 开发笔记 / API     CLAUDE.md
   • 命令帮助           python -m scraper --help
                        python -m scraper <command> --help
 

@@ -179,7 +179,6 @@ examples/
 config.example.yaml
 快速开始.txt          ← 30-line quickstart
 使用说明.txt          ← full Chinese manual
-CLAUDE.md             ← developer notes / architectural reasoning
 ```
 
 ---
@@ -197,4 +196,4 @@ CLAUDE.md             ← developer notes / architectural reasoning
 - Weibo keyword search requires the `SUB` cookie (anonymous search returns
   `ok=-100`); without it Weibo is skipped during a scrape, not fatal.
 - Tieba uses the sign-free mobile JSON path; on flagged / datacenter IPs the HTML
-  search page may 403, so it prefers the 吧 feed. See CLAUDE.md for details.
+  search page may 403, so it prefers the 吧 feed.
