@@ -1,4 +1,4 @@
-# 爬虫工具
+# scraper
 
 Async scraping + ML-analysis toolkit for **Bilibili**, **Zhihu**, **Weibo**, and
 **Baidu Tieba**. Built for personal/research use on Windows.
